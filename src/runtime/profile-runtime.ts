@@ -5,6 +5,7 @@ import { runRegistrationWizard } from '../bot/wizard';
 import { detectInstalledAgents, type DetectedAgent } from '../cli/agent-detection';
 import {
   createBootstrapCodexConfig,
+  createBootstrapDshConfig,
   createBootstrapProfileConfig,
   resolveBootstrapWorkspace,
 } from '../cli/profile-bootstrap';
@@ -90,6 +91,9 @@ export function createRuntimeProfileConfig(
     ...(input.agentKind === 'codex'
       ? { codex: input.codex ?? { binaryPath: process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex' } }
       : {}),
+    ...(input.agentKind === 'dsh'
+      ? { dsh: input.dsh ?? { binaryPath: process.env.LARK_CHANNEL_DSH_BIN ?? 'dsh' } }
+      : {}),
   });
 }
 
@@ -137,6 +141,9 @@ export async function resolveProfileRuntime(
     ...(migrationAgent ? { agentKind: migrationAgent } : {}),
     ...(needsMigration && migrationAgent === 'codex'
       ? { codex: await createBootstrapCodexConfig(undefined) }
+      : {}),
+    ...(needsMigration && migrationAgent === 'dsh'
+      ? { dsh: await createBootstrapDshConfig(undefined) }
       : {}),
   }, opts.handleActiveBridgeMigrationConflict);
 
@@ -395,7 +402,10 @@ function resolveBootstrapAgent(
   requestedAgent: AgentKind | undefined,
   profile: string | undefined,
 ): AgentKind | undefined {
-  return requestedAgent ?? (profile === 'codex' ? 'codex' : undefined);
+  if (requestedAgent) return requestedAgent;
+  // A profile named after an agent implies that agent; `claude` stays the
+  // implicit default for any other name.
+  return profile === 'codex' || profile === 'dsh' ? profile : undefined;
 }
 
 async function hasLegacyConfig(configPath: string): Promise<boolean> {

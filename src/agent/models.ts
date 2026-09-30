@@ -1,4 +1,5 @@
 import type { AgentKind } from '../config/profile-schema';
+import { DEFAULT_DSH_MODEL, DEFAULT_DSH_PROVIDER } from './dsh/patches';
 
 /**
  * Sentinel selection meaning "don't pass `--model`; let the agent CLI /
@@ -43,9 +44,36 @@ const CODEX_MODELS: ModelOption[] = [
   { value: 'o3', label: 'o3' },
 ];
 
+/**
+ * DeepSeek Harness models, derived from the provider declaration the DSH
+ * adapter writes into its generated overlay, so the picker and the overlay can
+ * never disagree. Selecting one pins DSH's `agent-default-model` for that run;
+ * {@link DEFAULT_MODEL} leaves the provider's own default in place, which the
+ * adapter still writes out explicitly — DSH's built-in default route has no
+ * credential, so a run that pinned nothing would fail.
+ *
+ * A profile whose `dsh.provider.models` was customized keeps this shipped list
+ * for the picker; the adapter refuses to emit an overlay for an id the profile
+ * does not declare, so the worst case is falling back to the provider default.
+ */
+const DSH_MODELS: ModelOption[] = [
+  { value: DEFAULT_MODEL, label: `跟随默认（${DEFAULT_DSH_MODEL}）` },
+  ...DEFAULT_DSH_PROVIDER.models.map((model) => ({
+    value: model.id,
+    label: model.name ?? model.id,
+  })),
+];
+
 /** The model picker options for a profile's agent kind. */
 export function supportedModels(agentKind: AgentKind): ModelOption[] {
-  return agentKind === 'codex' ? CODEX_MODELS : CLAUDE_MODELS;
+  switch (agentKind) {
+    case 'codex':
+      return CODEX_MODELS;
+    case 'dsh':
+      return DSH_MODELS;
+    default:
+      return CLAUDE_MODELS;
+  }
 }
 
 /** True when the selection means "use the agent default" (no `--model`). */

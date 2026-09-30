@@ -1,5 +1,7 @@
 import { mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
+import { DSH_DEFAULT_PROFILE, DEFAULT_DSH_PROVIDER } from '../agent/dsh/patches';
+import type { DshConfig } from '../agent/dsh/config';
 import { AgentPreflightError } from '../agent/preflight';
 import { createDefaultProfileConfig, type AgentKind, type ProfileConfig } from '../config/profile-schema';
 import type { AppConfig } from '../config/schema';
@@ -14,6 +16,7 @@ export interface BootstrapProfileInput {
   workspace?: string;
   defaultWorkspace?: string;
   codexBinaryPath?: string;
+  dshBinaryPath?: string;
   profileDir?: string;
 }
 
@@ -29,12 +32,15 @@ export async function createBootstrapProfileConfig(
     input.agentKind === 'codex'
       ? await createBootstrapCodexConfig(input.codexBinaryPath)
       : undefined;
+  const dsh =
+    input.agentKind === 'dsh' ? await createBootstrapDshConfig(input.dshBinaryPath) : undefined;
   const profile = createDefaultProfileConfig({
     agentKind: input.agentKind,
     accounts: input.accounts,
     preferences: input.preferences,
     secrets: input.secrets,
     ...(codex ? { codex } : {}),
+    ...(dsh ? { dsh } : {}),
   });
   if (workspace) {
     profile.workspaces = {
@@ -67,7 +73,7 @@ export async function createBootstrapCodexConfig(binaryPath: string | undefined)
   } catch (err) {
     const errno = (err as NodeJS.ErrnoException).code;
     throw new AgentPreflightError({
-      code: codexBootstrapBinaryErrorCode(errno),
+      code: bootstrapBinaryErrorCode(errno),
       agentId: 'codex',
       agentName: 'Codex CLI',
       command,
@@ -78,7 +84,37 @@ export async function createBootstrapCodexConfig(binaryPath: string | undefined)
   return { binaryPath: resolvedBinary };
 }
 
-function codexBootstrapBinaryErrorCode(errno: string | undefined) {
+/**
+ * Resolve the DSH launcher for a new profile.
+ *
+ * The provider declaration is recorded in the profile rather than read from the
+ * DSH install, so an existing DSH credential (resolved by DSH itself through
+ * `apiKeyEnv`) is shared without the bridge ever handling the secret.
+ */
+export async function createBootstrapDshConfig(binaryPath: string | undefined): Promise<DshConfig> {
+  const command = binaryPath ?? process.env.LARK_CHANNEL_DSH_BIN ?? 'dsh';
+  let resolvedBinary: string;
+  try {
+    resolvedBinary = await resolveExecutablePath(command);
+  } catch (err) {
+    const errno = (err as NodeJS.ErrnoException).code;
+    throw new AgentPreflightError({
+      code: bootstrapBinaryErrorCode(errno),
+      agentId: 'dsh',
+      agentName: 'DeepSeek Harness',
+      command,
+      binaryPath: command,
+      errno,
+    });
+  }
+  return {
+    binaryPath: resolvedBinary,
+    profile: DSH_DEFAULT_PROFILE,
+    provider: DEFAULT_DSH_PROVIDER,
+  };
+}
+
+function bootstrapBinaryErrorCode(errno: string | undefined) {
   if (errno === 'EACCES' || errno === 'EPERM') return 'agent-binary-not-executable';
   if (errno === 'ELOOP' || errno === 'ENOTDIR' || errno === 'EINVAL') {
     return 'agent-binary-resolve-failed';

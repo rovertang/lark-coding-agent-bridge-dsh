@@ -64,6 +64,45 @@ describe('agent-aware session catalog', () => {
     await catalog.flush();
   });
 
+  it('stores a DSH session id, because DSH is session-based rather than thread-based', async () => {
+    const catalog = new SessionCatalog(await path());
+
+    // Regression: the catalog used to branch on `agentId === 'claude'`, so every
+    // other session-id agent (DSH) fell into the Codex branch and threw
+    // "Codex catalog entries require threadId and must not include sessionId"
+    // mid-run — which aborted the reply stream even though the agent succeeded.
+    catalog.upsertActive({
+      scopeId: 'chat-1',
+      agentId: 'dsh',
+      cwdRealpath: '/repo',
+      policyFingerprint: 'fp-1',
+      sessionId: 'dsh-sess-1',
+      now: 3000,
+    });
+
+    expect(
+      catalog.activeFor({
+        scopeId: 'chat-1',
+        agentId: 'dsh',
+        cwdRealpath: '/repo',
+        policyFingerprint: 'fp-1',
+      }),
+    ).toMatchObject({ sessionId: 'dsh-sess-1', agentId: 'dsh' });
+
+    expect(() =>
+      catalog.upsertActive({
+        scopeId: 'chat-1',
+        agentId: 'dsh',
+        cwdRealpath: '/repo',
+        policyFingerprint: 'fp-1',
+        threadId: 'thread-wrong',
+        now: 3000,
+      }),
+    ).toThrow(/DSH.*sessionId/i);
+
+    await catalog.flush();
+  });
+
   it('rejects mismatched Claude/Codex identity fields and does not auto-resume damaged entries', async () => {
     const catalog = new SessionCatalog(await path());
 

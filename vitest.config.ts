@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 // Match tsup's `.html` text loader (tsup.config.ts) so `import html from
 // './generated/index.html'` returns the file's contents as a string under
@@ -17,4 +17,10 @@ export default defineConfig({
       },
     },
   ],
+  test: {
+    // `tmp/` is this fork's staging area for imported source trees. A staged
+    // copy carries its own `tests/`, whose suites would otherwise be collected a
+    // second time and fail against the staged copy's incomplete node_modules.
+    exclude: [...configDefaults.exclude, "tmp/**"],
+  },
 });

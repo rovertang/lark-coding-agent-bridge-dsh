@@ -248,6 +248,35 @@ describe('profile store canonical serialization', () => {
     });
   });
 
+  it('persists the dsh block across save→load round-trip', async () => {
+    const root = await tmpRoot();
+    const configPath = join(root, 'config.json');
+    const profile = createDefaultProfileConfig({
+      agentKind: 'dsh',
+      accounts: { app },
+      dsh: {
+        binaryPath: 'C:\\Users\\me\\bin\\dsh.cmd',
+        profile: 'headless',
+      },
+    });
+
+    await saveRootConfig({
+      schemaVersion: 2,
+      activeProfile: 'dsh',
+      preferences: {},
+      profiles: { dsh: profile },
+    }, configPath);
+
+    // Regression: the canonical serializer used to whitelist `codex` but not
+    // `dsh`, so the block was written away. The next `start` then failed while
+    // loading its own config with "dsh profile requires dsh configuration".
+    const saved = JSON.parse(await readFile(configPath, 'utf8'));
+    expect(saved.profiles.dsh.dsh).toEqual(profile.dsh);
+
+    const loaded = await loadRootConfig(configPath);
+    expect(loaded?.profiles.dsh?.dsh).toEqual(profile.dsh);
+  });
+
   it('marks newly created roots as already evaluated for permission default migration', () => {
     const profile = createDefaultProfileConfig({
       agentKind: 'claude',

@@ -4,6 +4,9 @@ import type {
   MessageReplyMode,
   SecretsConfig,
 } from './schema';
+import { normalizeDshConfig, type DshConfig } from '../agent/dsh/config';
+
+export type { DshConfig };
 import {
   normalizePermissions,
   permissionsToLegacySandbox,
@@ -13,7 +16,7 @@ import {
   type PermissionSource,
 } from './permissions';
 
-export type AgentKind = 'claude' | 'codex';
+export type AgentKind = 'claude' | 'codex' | 'dsh';
 export type SandboxMode = CodexSandboxMode;
 export type { AccessMode, PermissionConfig, PermissionSource };
 
@@ -160,6 +163,7 @@ export interface ProfileConfig {
   permissions: PermissionConfig;
   permissionSource?: PermissionSource;
   codex?: CodexConfig;
+  dsh?: DshConfig;
   attachments: AttachmentConfig;
   comments: CommentConfig;
   /** In-meeting agent settings. See {@link MeetingConfig}. */
@@ -204,6 +208,7 @@ export interface CreateDefaultProfileConfigInput {
   sandbox?: Partial<SandboxConfig>;
   permissions?: Partial<PermissionConfig>;
   codex?: CodexConfig;
+  dsh?: DshConfig;
   secrets?: SecretsConfig;
 }
 
@@ -239,6 +244,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     sandbox?: Partial<SandboxConfig>;
     permissions?: Partial<PermissionConfig>;
     codex?: CodexConfig & { flags?: unknown };
+    dsh?: unknown;
     attachments?: Partial<AttachmentConfig>;
     comments?: unknown;
     meeting?: unknown;
@@ -248,12 +254,15 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
   if (raw.schemaVersion !== 2) {
     throw new Error('profile schemaVersion must be 2');
   }
-  if (raw.agentKind !== 'claude' && raw.agentKind !== 'codex') {
-    throw new Error('agentKind must be claude or codex');
+  if (raw.agentKind !== 'claude' && raw.agentKind !== 'codex' && raw.agentKind !== 'dsh') {
+    throw new Error('agentKind must be claude, codex, or dsh');
   }
   const accounts = normalizeAccounts(raw.accounts);
   if (raw.agentKind === 'codex' && !raw.codex) {
     throw new Error('codex profile requires codex configuration');
+  }
+  if (raw.agentKind === 'dsh' && !raw.dsh) {
+    throw new Error('dsh profile requires dsh configuration');
   }
 
   const preferences = normalizePreferences(raw.preferences);
@@ -284,6 +293,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     permissions,
     permissionSource,
     ...(raw.codex ? { codex: normalizeCodex(raw.codex) } : {}),
+    ...(raw.dsh ? { dsh: normalizeDshConfig(raw.dsh) } : {}),
     attachments: {
       maxCount: numberOr(raw.attachments?.maxCount, 10),
       maxBytes: numberOr(raw.attachments?.maxBytes, 100 * 1024 * 1024),

@@ -3,7 +3,7 @@ import { open, readFile, rename, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
-import type { AgentCapabilityId } from '../agent/capability';
+import { isSessionIdAgent, type AgentCapabilityId } from '../agent/capability';
 
 export type CatalogAgentId = AgentCapabilityId;
 export type SessionCatalogStatus = 'active' | 'archived';
@@ -214,7 +214,7 @@ function normalizeEntry(input: unknown): SessionCatalogEntry | undefined {
   if (
     typeof raw.key !== 'string' ||
     typeof raw.scopeId !== 'string' ||
-    (raw.agentId !== 'claude' && raw.agentId !== 'codex') ||
+    (raw.agentId !== 'claude' && raw.agentId !== 'codex' && raw.agentId !== 'dsh') ||
     typeof raw.cwdRealpath !== 'string' ||
     typeof raw.policyFingerprint !== 'string' ||
     (raw.status !== 'active' && raw.status !== 'archived') ||
@@ -247,14 +247,17 @@ function matchesIdentity(entry: SessionCatalogEntry, input: SessionCatalogIdenti
 }
 
 function isValidAgentEntry(entry: SessionCatalogEntry): boolean {
-  if (entry.agentId === 'claude') return Boolean(entry.sessionId) && !entry.threadId;
+  if (isSessionIdAgent(entry.agentId)) {
+    return Boolean(entry.sessionId) && !entry.threadId;
+  }
   return Boolean(entry.threadId) && !entry.sessionId;
 }
 
 function assertAgentIdentity(input: UpsertSessionCatalogInput): void {
-  if (input.agentId === 'claude') {
+  if (isSessionIdAgent(input.agentId)) {
     if (!input.sessionId || input.threadId) {
-      throw new Error('Claude catalog entries require sessionId and must not include threadId');
+      const label = input.agentId === 'claude' ? 'Claude' : 'DSH';
+      throw new Error(`${label} catalog entries require sessionId and must not include threadId`);
     }
     return;
   }

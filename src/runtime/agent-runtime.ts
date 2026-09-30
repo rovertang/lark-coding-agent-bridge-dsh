@@ -1,6 +1,8 @@
 import { ClaudeAdapter } from '../agent/claude/adapter';
 import { CodexAdapter } from '../agent/codex/adapter';
-import { AgentPreflightError, type AgentAvailability } from '../agent/preflight';
+import { DshAdapter } from '../agent/dsh/adapter';
+import { DEFAULT_DSH_PROVIDER } from '../agent/dsh/patches';
+import { AgentPreflightError, type AgentAvailability, type LocalAgentId } from '../agent/preflight';
 import type { AgentAdapter } from '../agent/types';
 import type { AppPaths } from '../config/app-paths';
 import type { AgentKind, ProfileConfig } from '../config/profile-schema';
@@ -49,6 +51,22 @@ export function createRuntimeAgent(
       larkChannel,
     });
   }
+  if (profileConfig.agentKind === 'dsh') {
+    const dsh = profileConfig.dsh;
+    if (!dsh?.binaryPath) {
+      throw new Error('dsh profile requires dsh.binaryPath');
+    }
+    return new DshAdapter({
+      binary: dsh.binaryPath,
+      profileStateDir: appPaths.profileDir,
+      provider: dsh.provider ?? DEFAULT_DSH_PROVIDER,
+      ...(dsh.profile ? { profile: dsh.profile } : {}),
+      ...(dsh.patches ? { patches: dsh.patches } : {}),
+      ...(dsh.dshHome ? { dshHome: dsh.dshHome } : {}),
+      sandbox: profileConfig.sandbox.defaultMode,
+      larkChannel,
+    });
+  }
   return new ClaudeAdapter({ larkChannel });
 }
 
@@ -56,11 +74,12 @@ export async function checkRuntimeAgentAvailability(agent: AgentAdapter): Promis
   if (agent.checkAvailability) return agent.checkAvailability();
   const ok = await agent.isAvailable();
   if (ok) return { ok: true };
+  const agentId: LocalAgentId = agent.id === 'codex' || agent.id === 'dsh' ? agent.id : 'claude';
   const diagnostic = {
     code: 'agent-binary-not-found' as const,
-    agentId: agent.id === 'codex' ? ('codex' as const) : ('claude' as const),
+    agentId,
     agentName: agent.displayName,
-    command: agent.id === 'codex' ? 'codex' : 'claude',
+    command: agentId,
   };
   return { ok: false, diagnostic, error: new AgentPreflightError(diagnostic) };
 }
