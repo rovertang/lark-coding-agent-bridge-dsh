@@ -222,7 +222,7 @@ function userIdCandidates(): string[] {
   return [...new Set(candidates)];
 }
 
-interface SchtasksResult {
+export interface SchtasksResult {
   ok: boolean;
   stderr: string;
   stdout: string;
@@ -234,6 +234,25 @@ function runSchtasks(args: string[]): SchtasksResult {
     ok: r.status === 0,
     stderr: r.stderr ?? '',
     stdout: r.stdout ?? '',
+  };
+}
+
+/**
+ * `schtasks /Create /F` cannot overwrite a task whose security descriptor
+ * grants the current account read-only access — which is what happens when the
+ * task was originally registered from an elevated shell, where its owner
+ * becomes BUILTIN\Administrators. The raw error ("Access is denied." /
+ * "错误: 拒绝访问。") says nothing about that, so spell out the fix.
+ */
+export function withAccessDeniedHint(r: SchtasksResult, taskName: string): SchtasksResult {
+  if (r.ok) return r;
+  if (!/access is denied|拒绝访问/i.test(r.stderr)) return r;
+  return {
+    ...r,
+    stderr:
+      `${r.stderr.trim()}\n` +
+      `提示：计划任务 "${taskName}" 可能由其他账户（例如管理员）创建，当前账户只有读权限，无法用 /F 覆盖。\n` +
+      `请以管理员身份删除后重试：schtasks /Delete /F /TN "${taskName}"`,
   };
 }
 
@@ -264,7 +283,7 @@ export async function installTask(
     const xml = buildTaskXml({ taskName, wrapperPath, userId });
     // Task Scheduler expects Unicode XML; write UTF-16LE with a BOM.
     await writeFile(xmlPath, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(xml, 'utf16le')]));
-    last = runSchtasks(['/Create', '/F', '/TN', taskName, '/XML', xmlPath]);
+    last = withAccessDeniedHint(runSchtasks(['/Create', '/F', '/TN', taskName, '/XML', xmlPath]), taskName);
     if (last.ok) return last;
   }
   return last;
@@ -320,14 +339,47 @@ export function isTaskRegistered(profile: string): boolean {
 }
 
 /**
- * Parse `/Query /V /FO LIST` output for the current run state. Looks for
- * `Status: Running` in the verbose listing. Other states include
- * "Ready" (registered, not currently running) and "Disabled".
+ * A `Status` / `状态` line, capturing the value that follows it. Field *names*
+ * come out in English even on a zh-CN Windows, but both the field and its
+ * value are localized elsewhere, so the value is matched separately.
  */
+const TASK_STATUS_LINE = /(?:Status|状态)\s*[:：]\s*(\S[^\r\n]*)/i;
+
+/** "Running" in the spellings we recognize (en / zh-CN). */
+const TASK_STATUS_RUNNING = /^(?:Running|正在运行)/i;
+
+/**
+ * `267009` (0x41301, `SCHED_S_TASK_RUNNING`) is the `Last Result` a task
+ * reports *while it is running*, and unlike every label around it the number
+ * is not localized. So when a locale spells neither the field nor the value
+ * the way the patterns above expect (French `Statut:`, German
+ * `Wird ausgeführt`, …) this is the only signal left — and ignoring it makes
+ * `bridge status` call a serving daemon dead, while `start` skips reaping the
+ * instance it believes is gone.
+ */
+const TASK_LAST_RESULT_RUNNING = /(?:^|\s)267009(?=\s|$)/m;
+
+/**
+ * Parse `/Query /V /FO LIST` output for the current run state. Other states
+ * include "Ready" (registered, not currently running) and "Disabled".
+ *
+ * A recognized `Status` line decides on its own: `Ready`/`Disabled` must stay
+ * "not running" even though some listings still carry 267009 in `Last
+ * Result`. The state code is consulted only when no status line was
+ * recognized at all, which is what keeps the check locale-tolerant without
+ * making it a blanket "any output means running".
+ */
+export function parseTaskRunning(output: string): boolean {
+  const [, statusValue] = TASK_STATUS_LINE.exec(output) ?? [];
+  if (statusValue !== undefined) return TASK_STATUS_RUNNING.test(statusValue.trim());
+  return TASK_LAST_RESULT_RUNNING.test(output);
+}
+
+/** Parse `/Query /V /FO LIST` output for the current run state. */
 export function isTaskRunning(profile: string): boolean {
   const r = runSchtasks(['/Query', '/V', '/FO', 'LIST', '/TN', windowsTaskName(profile)]);
   if (!r.ok) return false;
-  return /Status:\s+Running/i.test(r.stdout);
+  return parseTaskRunning(r.stdout);
 }
 
 export function describeTask(profile: string): string {

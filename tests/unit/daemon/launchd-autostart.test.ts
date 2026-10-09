@@ -9,6 +9,14 @@ vi.mock('node:child_process', async (importOriginal) => ({
   spawnSync: mocks.spawnSync,
 }));
 
+// `launchctl` targets are `gui/<uid>/<label>`. Pinning the uid keeps the
+// assertions below strict on every host — on Windows `userInfo().uid` is -1,
+// which made them fail for a reason that has nothing to do with launchd.
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, userInfo: () => ({ ...actual.userInfo(), uid: 501 }) };
+});
+
 const { getServiceAdapter } = await import('../../../src/daemon/service-adapter');
 const { launchAgentLabel } = await import('../../../src/daemon/paths');
 
@@ -79,6 +87,20 @@ describe('launchd autostart lifecycle', () => {
     adapter?.disableAutostart();
 
     expect(launchctlCalls()).toEqual([expect.stringMatching(/^disable gui\/\d+\//)]);
+  });
+
+  it('restart re-enables before kickstart so a disabled job comes back', () => {
+    const label = launchAgentLabel('supervisor');
+    const adapter = getServiceAdapter('supervisor', ['run', '--web-ui']);
+
+    adapter?.restart();
+
+    // kickstart on a job left disabled by an earlier stop fails outright;
+    // restarting must therefore enable first, exactly like start.
+    expect(launchctlCalls()).toEqual([
+      expect.stringMatching(new RegExp(`^enable gui/\\d+/${label}$`)),
+      expect.stringMatching(new RegExp(`^kickstart -k gui/\\d+/${label}$`)),
+    ]);
   });
 
   it('plain stop (used when bouncing during start) leaves autostart intact', () => {

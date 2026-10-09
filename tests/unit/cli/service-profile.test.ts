@@ -9,7 +9,9 @@ const mocks = vi.hoisted(() => ({
   materializeEnvSecretForService: vi.fn(),
   resolveProfileRuntime: vi.fn(),
   readAndPrune: vi.fn(),
+  isAlive: vi.fn(),
   checkRuntimeLock: vi.fn(),
+  clearRuntimeLockArtifacts: vi.fn(),
   stopProcessEntry: vi.fn(),
   readActiveProfile: vi.fn(),
   loadRootConfig: vi.fn(),
@@ -26,10 +28,12 @@ vi.mock('../../../src/runtime/profile-runtime', () => ({
 
 vi.mock('../../../src/runtime/registry', () => ({
   readAndPrune: mocks.readAndPrune,
+  isAlive: mocks.isAlive,
 }));
 
 vi.mock('../../../src/runtime/locks', () => ({
   checkRuntimeLock: mocks.checkRuntimeLock,
+  clearRuntimeLockArtifacts: mocks.clearRuntimeLockArtifacts,
 }));
 
 vi.mock('../../../src/cli/commands/ps', () => ({
@@ -106,6 +110,9 @@ describe('profile-aware service commands', () => {
       },
     });
     mocks.checkRuntimeLock.mockResolvedValue({ locked: false });
+    // Lock owners are alive unless a test says otherwise.
+    mocks.isAlive.mockReturnValue(true);
+    mocks.clearRuntimeLockArtifacts.mockResolvedValue(undefined);
     mocks.readActiveProfile.mockResolvedValue('codex-dev');
     mocks.loadRootConfig.mockResolvedValue({
       profiles: {
@@ -378,6 +385,46 @@ describe('profile-aware service commands', () => {
     expect(mocks.adapter.install).toHaveBeenCalled();
     expect(mocks.adapter.start).toHaveBeenCalled();
     expect(lines).toContain('✓ 已停止 pid 2468');
+  });
+
+  it('reclaims a runtime lock whose owner has died instead of refusing to start', async () => {
+    const lines: string[] = [];
+    vi.spyOn(console, 'log').mockImplementation((line: string) => {
+      lines.push(line);
+    });
+    const deadHolder = {
+      kind: 'profile' as const,
+      target: '/tmp/lark-channel-home/registry/locks/profile/codex-dev.lock',
+      profile: 'codex-dev',
+      agentKind: 'codex' as const,
+      pid: 999999,
+      startedAt: '2026-10-09T02:00:00.000Z',
+    };
+    mocks.isAlive.mockReturnValue(false);
+    mocks.checkRuntimeLock
+      .mockResolvedValueOnce({ locked: true, meta: deadHolder })
+      .mockResolvedValueOnce({ locked: false });
+    mocks.readAndPrune
+      .mockReturnValueOnce([])
+      .mockReturnValue([
+        processEntry({
+          id: 'p1',
+          pid: 12345,
+          appId: 'cli_codex',
+          profileName: 'codex-dev',
+          agentKind: 'codex',
+          botName: 'Codex Bot',
+        }),
+      ]);
+
+    await runServiceStart({ profile: 'codex-dev', skipCheckLarkCli: true });
+
+    // proper-lockfile only expires artifacts on a timer, so a hard-killed
+    // owner (Task Scheduler /End, SIGKILL, crash) would otherwise block the
+    // start with a "profile busy" message pointing at a dead pid.
+    expect(mocks.clearRuntimeLockArtifacts).toHaveBeenCalledWith(deadHolder.target);
+    expect(mocks.stopProcessEntry).not.toHaveBeenCalled();
+    expect(mocks.adapter.start).toHaveBeenCalled();
   });
 
   it('rejects start when another profile already holds the same app lock', async () => {

@@ -95,7 +95,13 @@ function makeLaunchdAdapter(profile: string, runArgs: string[]): ServiceAdapter 
       return out.ok ? disabled : out;
     },
     disableAutostart: () => launchd.disable(profile),
-    restart: () => launchd.kickstart(profile),
+    // `kickstart -k` refuses to start a job that a previous stop left disabled
+    // in launchd's override DB, so re-enable exactly like `start` does —
+    // otherwise `restart` reports success and the daemon never comes back.
+    restart: () => {
+      launchd.enable(profile);
+      return launchd.kickstart(profile);
+    },
     waitUntilStopped: (timeoutMs) => launchd.waitUntilUnloaded(profile, timeoutMs),
     deleteFile: () => launchd.deletePlist(profile),
     describeStatus: () => launchd.describeService(profile),
@@ -275,7 +281,10 @@ function makeSchtasksAdapter(profile: string, runArgs: string[]): ServiceAdapter
     },
     disableAutostart: () => schtasks.disableTask(profile),
     // schtasks has no native /Restart: end, reap the daemon, then run again.
+    // Re-enable first for the same reason as `start` — a disabled task refuses
+    // `/Run`, which would turn a restart into a silent no-op.
     restart: async () => {
+      schtasks.enableTask(profile);
       schtasks.endTask(profile);
       await terminateProfileDaemons(profile);
       await schtasks.waitUntilStopped(profile);

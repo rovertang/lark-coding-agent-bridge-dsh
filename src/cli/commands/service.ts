@@ -12,8 +12,8 @@ import {
   materializeEnvSecretForService,
   resolveProfileRuntime,
 } from '../../runtime/profile-runtime';
-import { readAndPrune, type ProcessEntry } from '../../runtime/registry';
-import { checkRuntimeLock, type RuntimeLockMeta } from '../../runtime/locks';
+import { isAlive, readAndPrune, type ProcessEntry } from '../../runtime/registry';
+import { checkRuntimeLock, clearRuntimeLockArtifacts, type RuntimeLockMeta } from '../../runtime/locks';
 import { preFlightChecks } from '../preflight';
 import { promptAndStopActiveBridgeMigrationConflict } from './migrate';
 import { stopProcessEntry, type StopProcessEntryResult } from './ps';
@@ -180,9 +180,24 @@ async function assertLockNotHeldByAnotherRuntime(
   adapter: ServiceAdapter,
   opts: Pick<ServiceStartOptions, 'confirmStopRuntimeLockProcess' | 'stopRuntimeLockProcess'> = {},
 ): Promise<void> {
+  // Reclaiming a dead owner's lock must happen at most once: if the artifacts
+  // cannot actually be removed, retrying would spin this loop forever.
+  let deadOwnerReclaimed = false;
   for (;;) {
     const lock = await checkRuntimeLock(target);
     if (!lock.locked) return;
+
+    // A lock whose recorded owner is already gone is stale by definition, but
+    // proper-lockfile only expires artifacts on a timer (30s for
+    // `acquireRuntimeLock`, 10s for a bare `check`). A hard kill — Task
+    // Scheduler `/End`, launchctl SIGKILL, a crash — therefore leaves a
+    // "profile busy" lock that points at a pid which no longer exists, and
+    // `start` refuses to run until the timer elapses. Clear it and re-check.
+    if (!deadOwnerReclaimed && lock.meta?.pid !== undefined && !isAlive(lock.meta.pid)) {
+      deadOwnerReclaimed = true;
+      await clearRuntimeLockArtifacts(target);
+      continue;
+    }
 
     const servicePid = adapter.isRunning() ? adapter.parseStatus(adapter.describeStatus()).pid : undefined;
     if (servicePid && lock.meta?.pid === Number(servicePid)) return;
