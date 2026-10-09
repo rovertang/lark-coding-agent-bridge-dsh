@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import * as lockfile from 'proper-lockfile';
 import type { AppPaths } from '../config/app-paths';
@@ -98,6 +98,22 @@ export function runtimeLockMetaFile(target: string): string {
   return `${target}.meta.json`;
 }
 
+/**
+ * Remove the on-disk artifacts a lock leaves behind: the `<target>.lock`
+ * directory (proper-lockfile uses it as an atomic marker and its mtime as the
+ * freshness signal) plus our metadata sidecar.
+ *
+ * The caller must have established that the lock's owner is gone — this only
+ * deletes files, it does not check liveness. It exists because a lock whose
+ * owner was hard-killed is stale by definition, while waiting for the
+ * staleness horizon to elapse (30s in `acquireRuntimeLock`) would stall the
+ * next start for that long.
+ */
+export async function clearRuntimeLockArtifacts(target: string): Promise<void> {
+  await rm(`${target}.lock`, { recursive: true, force: true });
+  await rm(runtimeLockMetaFile(target), { force: true });
+}
+
 export async function readRuntimeLockMeta(target: string): Promise<RuntimeLockMeta | undefined> {
   try {
     const parsed = JSON.parse(await readFile(runtimeLockMetaFile(target), 'utf8')) as unknown;
@@ -108,14 +124,25 @@ export async function readRuntimeLockMeta(target: string): Promise<RuntimeLockMe
   }
 }
 
-export async function checkRuntimeLock(target: string): Promise<{
+export async function checkRuntimeLock(
+  target: string,
+  opts: { staleMs?: number } = {},
+): Promise<{
   locked: boolean;
   meta?: RuntimeLockMeta;
   uncertain?: boolean;
   error?: string;
 }> {
   try {
-    const locked = await lockfile.check(target, { realpath: false });
+    // NB: proper-lockfile's `check` spreads options over its defaults, so an
+    // explicit `stale: undefined` would silently become 2s — only pass it when
+    // the caller asked for a specific horizon.
+    const locked = await lockfile.check(
+      target,
+      opts.staleMs === undefined
+        ? { realpath: false }
+        : { realpath: false, stale: opts.staleMs },
+    );
     if (!locked) return { locked: false };
     const meta = await readRuntimeLockMeta(target);
     if (!meta) {

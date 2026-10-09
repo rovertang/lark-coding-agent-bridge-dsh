@@ -1,9 +1,14 @@
-import { mkdir, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { resolveAppPaths } from '../../../src/config/app-paths';
-import { withProfileAndAppLocks } from '../../../src/runtime/locks';
+import {
+  checkRuntimeLock,
+  clearRuntimeLockArtifacts,
+  runtimeLockMetaFile,
+  withProfileAndAppLocks,
+} from '../../../src/runtime/locks';
 
 const roots: string[] = [];
 
@@ -64,6 +69,51 @@ describe('runtime locks', () => {
 
     expect(source).toMatch(/realpath:\s*false/);
     expect(source).not.toMatch(/RunPolicy|AgentAdapter|startChannel|createLarkChannel/);
+  });
+
+  it('frees a hard-killed owner lock at once instead of waiting out the staleness horizon', async () => {
+    const root = await makeRoot();
+    const paths = resolveAppPaths({ rootDir: root, profile: 'claude' });
+    await mkdir(paths.userLockDir, { recursive: true });
+
+    // Reproduce what a hard kill (TerminateProcess, which is what SIGTERM means
+    // on Windows) leaves behind: proper-lockfile's lock directory with a fresh
+    // mtime, plus our metadata sidecar naming the dead owner.
+    const target = paths.profileLockFile;
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, '', { flag: 'a' });
+    await mkdir(`${target}.lock`, { recursive: true });
+    await writeFile(
+      runtimeLockMetaFile(target),
+      `${JSON.stringify({
+        kind: 'profile',
+        target,
+        profile: 'claude',
+        agentKind: 'claude',
+        pid: 0x7fff_fffe,
+        startedAt: new Date().toISOString(),
+      })}\n`,
+    );
+
+    // The artifacts are fresh, so the lock still counts as held under the same
+    // 30s horizon acquireRuntimeLock uses — this is the state that used to make
+    // stop/start/restart stall for ~30 seconds.
+    await expect(checkRuntimeLock(target, { staleMs: 30_000 })).resolves.toMatchObject({
+      locked: true,
+    });
+
+    await clearRuntimeLockArtifacts(target);
+
+    // Now it is free immediately, and the sidecar is gone too.
+    await expect(checkRuntimeLock(target, { staleMs: 30_000 })).resolves.toMatchObject({
+      locked: false,
+    });
+    await expect(stat(runtimeLockMetaFile(target))).rejects.toMatchObject({ code: 'ENOENT' });
+
+    // A fresh acquisition on top of the cleared artifacts succeeds.
+    await withProfileAndAppLocks(paths, 'cli_test', 'claude', async (acquired) => {
+      expect(acquired.map((lock) => lock.kind)).toEqual(['profile', 'app']);
+    });
   });
 
   it('surfaces holder metadata when profile or app locks conflict', async () => {

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { resolveAppPaths } from '../../../src/config/app-paths';
 import { runtimeLockMetaFile, withProfileAndAppLocks } from '../../../src/runtime/locks';
 import {
+  liveEntriesForProfile,
   readAndPrune,
   register,
   sameAppLiveOthers,
@@ -175,7 +176,7 @@ describe('registry and runtime lock integration', () => {
 
     expect(registrySource).toMatch(/lockfile\.lock\(registryFile,[\s\S]*realpath:\s*false/);
     expect(registrySource).toMatch(/lockfile\.lockSync\(registryFile,[\s\S]*realpath:\s*false/);
-    expect(lockSource).toMatch(/lockfile\.check\(target,[\s\S]*realpath:\s*false/);
+    expect(lockSource).toMatch(/lockfile\.check\(\s*target,[\s\S]*?realpath:\s*false/);
   });
 
   it('fails closed instead of pruning when live lock metadata is unreadable', async () => {
@@ -208,6 +209,28 @@ describe('registry and runtime lock integration', () => {
 
       const persisted = JSON.parse(await readFile(registryFile, 'utf8')) as { entries: ProcessEntry[] };
       expect(persisted.entries.map((item) => item.id)).toEqual(['locked']);
+    });
+  });
+
+  it('reports only entries that provably own their runtime locks, so kills cannot hit a recycled pid', async () => {
+    const root = await makeRoot();
+    const registryFile = join(root, 'registry', 'processes.json');
+    await writeJson(registryFile, {
+      entries: [
+        // Live per `process.kill(pid, 0)` yet holding no lock: exactly the shape
+        // a hard kill leaves behind, and exactly why killing by raw registry pid
+        // is unsafe. The pid here is the test runner's own.
+        entry({ id: 'no-lock', pid: process.pid, profileName: 'claude', appId: 'cli_existing' }),
+        entry({ id: 'other-profile', pid: process.pid, profileName: 'codex-dev', appId: 'cli_other' }),
+      ],
+    });
+
+    await expect(liveEntriesForProfile('claude', registryFile)).resolves.toEqual([]);
+
+    const lockedPaths = resolveAppPaths({ rootDir: root, profile: 'claude' });
+    await withProfileAndAppLocks(lockedPaths, 'cli_existing', 'claude', async () => {
+      const live = await liveEntriesForProfile('claude', registryFile);
+      expect(live.map((item) => item.id)).toEqual(['no-lock']);
     });
   });
 

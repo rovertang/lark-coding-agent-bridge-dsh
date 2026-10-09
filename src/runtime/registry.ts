@@ -236,6 +236,33 @@ export async function sameAppLiveOthers(
 }
 
 /**
+ * Registry entries for `profile` that still provably own their runtime locks.
+ *
+ * `readAndPrune` is a plain read despite the name — it does not prune. A daemon
+ * that was force-killed leaves its entry behind, and the OS recycles PIDs, so
+ * acting on a raw entry can mean terminating an unrelated process. Callers that
+ * kill processes must gate on this instead.
+ *
+ * Entries whose lock state cannot be determined are treated as not live:
+ * refusing to act is always safer than guessing.
+ */
+export async function liveEntriesForProfile(
+  profile: string,
+  registryFile: string = paths.processesFile,
+): Promise<ProcessEntry[]> {
+  const live: ProcessEntry[] = [];
+  for (const entry of readAndPrune(registryFile)) {
+    if (entry.profileName !== profile) continue;
+    try {
+      if (!(await isEntryStale(entry, registryFile))) live.push(entry);
+    } catch {
+      // Unknown lock state (see lockMatchesEntry) — do not touch the entry.
+    }
+  }
+  return live;
+}
+
+/**
  * Resolve `target` (short id OR 1-based index in the current `ps` view) to
  * an entry. Index lookup uses the same read-only order as `readAndPrune()`.
  */

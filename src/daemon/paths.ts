@@ -95,6 +95,30 @@ export function windowsLauncherCmdPath(profile: string = paths.profile): string 
   return join(paths.appDir, 'daemon', serviceProfileId(profile), 'launcher.cmd');
 }
 
+/**
+ * Hidden launcher wrapper invoked by the scheduled task.
+ *
+ * Task Scheduler has no "hide the window" setting: a .cmd action always gets
+ * a console window, and closing that window kills the whole process tree with
+ * STATUS_CONTROL_C_EXIT (0xC000013A) — a silent outage until the next logon,
+ * because ONLOGON is the only trigger. This wrapper launches launcher.cmd with
+ * window style 0 (hidden) and *waits* for it, so the daemon never has a
+ * closeable window while Task Scheduler still tracks the task instance
+ * (`schtasks /End` keeps working).
+ */
+export function windowsHiddenWrapperPath(profile: string = paths.profile): string {
+  return join(paths.appDir, 'daemon', serviceProfileId(profile), 'launcher-hidden.vbs');
+}
+
+/**
+ * Task Scheduler XML (`schtasks /Create /XML`) describing the daemon task.
+ * Kept on disk next to the launcher so the registered definition can be
+ * diffed against what the bridge intended to install.
+ */
+export function windowsTaskXmlPath(profile: string = paths.profile): string {
+  return join(paths.appDir, 'daemon', serviceProfileId(profile), 'task.xml');
+}
+
 // === Daemon log paths (platform-agnostic) ===
 
 /**

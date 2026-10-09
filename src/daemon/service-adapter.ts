@@ -2,6 +2,10 @@ import * as launchd from './launchd';
 import { launchAgentPlistPath, systemdUnitPath, windowsTaskName } from './paths';
 import * as schtasks from './schtasks';
 import * as systemd from './systemd';
+import { resolveAppPaths } from '../config/app-paths';
+import { paths } from '../config/paths';
+import { checkRuntimeLock, clearRuntimeLockArtifacts } from '../runtime/locks';
+import { isAlive, liveEntriesForProfile, readAndPrune } from '../runtime/registry';
 
 export interface ServiceResult {
   ok: boolean;
@@ -135,6 +139,104 @@ function makeSystemdAdapter(profile: string, runArgs: string[]): ServiceAdapter 
   };
 }
 
+/**
+ * `schtasks /End` terminates the task instance (the hidden wrapper and the
+ * launcher cmd) but NOT the detached node daemon underneath it. The daemon
+ * survives as an orphan and keeps holding the profile runtime lock, so the
+ * next `start` / `restart` finds the lock taken and exits.
+ *
+ * Killing the orphan is not enough on its own: on Windows the kill is a hard
+ * TerminateProcess (there is no graceful SIGTERM), so proper-lockfile's
+ * signal-exit cleanup never runs and its artifacts stay behind. A freshly
+ * spawned daemon would fail to acquire the lock until those age out (30s in
+ * `acquireRuntimeLock`) and — with restart-on-failure armed — retry that
+ * doomed start every minute.
+ *
+ * So: kill only daemons that provably own this profile's lock, then make the
+ * locks genuinely free again before returning.
+ */
+const LOCK_RELEASE_WAIT_MS = 40_000;
+const LOCK_STALE_MS = 30_000; // must match the horizon used by acquireRuntimeLock
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Make `targets` genuinely acquirable again.
+ *
+ * Waiting out proper-lockfile's staleness horizon would block `stop` / `start`
+ * / `restart` for ~30s on every call. A lock whose recorded owner is no longer
+ * alive is stale by definition, so its artifacts can be cleared right away; a
+ * lock with a live owner is left strictly alone. The poll that follows is a
+ * safety net for the cases we must not clear.
+ */
+async function ensureRuntimeLocksReleased(targets: string[], timeoutMs: number): Promise<void> {
+  for (const target of targets) {
+    const lock = await checkRuntimeLock(target, { staleMs: LOCK_STALE_MS });
+    if (!lock.locked || lock.uncertain) continue;
+    const ownerPid = lock.meta?.pid;
+    if (ownerPid !== undefined && isAlive(ownerPid)) continue;
+    await clearRuntimeLockArtifacts(target);
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const locks = await Promise.all(
+      targets.map((target) => checkRuntimeLock(target, { staleMs: LOCK_STALE_MS })),
+    );
+    if (locks.every((lock) => !lock.locked || lock.uncertain)) return;
+    if (Date.now() >= deadline) return; // best-effort: let the caller surface the failure
+    await delay(500);
+  }
+}
+
+async function terminateProfileDaemons(
+  profile: string,
+  timeoutMs = 2000,
+  lockWaitMs = LOCK_RELEASE_WAIT_MS,
+): Promise<void> {
+  const appPaths = resolveAppPaths({ rootDir: paths.rootDir, profile });
+  const live = await liveEntriesForProfile(profile);
+
+  if (live.length === 0) {
+    // No daemon provably owns this profile any more, but a previous hard kill
+    // can still have left runtime locks behind — either one would stall the
+    // next start, so clear every lock this profile's entries could have owned.
+    const appIds = readAndPrune()
+      .filter((entry) => entry.profileName === profile)
+      .map((entry) => entry.appId);
+    await ensureRuntimeLocksReleased(
+      [appPaths.profileLockFile, ...[...new Set(appIds)].map((appId) => appPaths.appLockFile(appId))],
+      lockWaitMs,
+    );
+    return;
+  }
+
+  for (const entry of live) {
+    try {
+      process.kill(entry.pid, 'SIGTERM');
+    } catch {
+      // already gone
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && isAlive(entry.pid)) {
+      await delay(100);
+    }
+    if (isAlive(entry.pid)) {
+      try {
+        process.kill(entry.pid, 'SIGKILL');
+      } catch {
+        // raced with exit
+      }
+    }
+    await ensureRuntimeLocksReleased(
+      [appPaths.profileLockFile, appPaths.appLockFile(entry.appId)],
+      lockWaitMs,
+    );
+  }
+}
+
 function makeSchtasksAdapter(profile: string, runArgs: string[]): ServiceAdapter {
   return {
     platformName: 'Task Scheduler (Windows)',
@@ -150,15 +252,35 @@ function makeSchtasksAdapter(profile: string, runArgs: string[]): ServiceAdapter
     },
     // Mirror launchd: a previous `stop` disabled the task, and a disabled
     // task refuses to run. Re-enable before starting it.
-    start: () => {
+    //
+    // Also reap any daemon still holding the profile lock: an earlier `/End`
+    // (or the restart path, which degrades to `start` when the task instance
+    // is already gone) leaves the daemon running as an orphan, and starting a
+    // second one on top of it only fails on the runtime lock.
+    start: async () => {
       schtasks.enableTask(profile);
+      await terminateProfileDaemons(profile);
       return schtasks.runTask(profile);
     },
-    stop: () => schtasks.endTask(profile),
-    stopAndDisableAutostart: () => schtasks.endAndDisable(profile),
+    // `/End` alone would leave the daemon orphaned (see helper above).
+    stop: async () => {
+      const r = schtasks.endTask(profile);
+      await terminateProfileDaemons(profile);
+      return r;
+    },
+    stopAndDisableAutostart: async () => {
+      const r = schtasks.endAndDisable(profile);
+      await terminateProfileDaemons(profile);
+      return r;
+    },
     disableAutostart: () => schtasks.disableTask(profile),
-    // schtasks has no native /Restart — adapter awaits end+wait+run.
-    restart: () => schtasks.restartTask(profile),
+    // schtasks has no native /Restart: end, reap the daemon, then run again.
+    restart: async () => {
+      schtasks.endTask(profile);
+      await terminateProfileDaemons(profile);
+      await schtasks.waitUntilStopped(profile);
+      return schtasks.runTask(profile);
+    },
     waitUntilStopped: (timeoutMs) => schtasks.waitUntilStopped(profile, timeoutMs),
     deleteFile: async () => {
       await schtasks.deleteTask(profile);
